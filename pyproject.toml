@@ -2,11 +2,8 @@
 name = "comfyui_tensorrt"
 description = "TensorRT Node for ComfyUI\nThis node enables the best performance on NVIDIA RTX™ Graphics Cards  (GPUs) for Stable Diffusion by leveraging NVIDIA TensorRT."
 version = "0.1.7"
-license = "LICENSE"
-dependencies = [
-  "tensorrt>=10.0.1",
-  "onnx"
-]
+license = { file = "LICENSE" }
+dynamic = ["dependencies"]
 
 [project.urls]
 Repository = "https://github.com/comfyanonymous/ComfyUI_TensorRT"
@@ -15,3 +12,17 @@ Repository = "https://github.com/comfyanonymous/ComfyUI_TensorRT"
 PublisherId = "comfy"
 DisplayName = "ComfyUI_TensorRT"
 Icon = ""
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["comfyui_tensorrt"]
+package-dir = { "comfyui_tensorrt" = "." }
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[project.entry-points."comfyui.custom_nodes"]
+comfyui_tensorrt = "comfyui_tensorrt"

@@ -1,13 +1,16 @@
-#Put this in the custom_nodes folder, put your tensorrt engine files in ComfyUI/models/tensorrt/ (you will have to create the directory)
+# Put this in the custom_nodes folder, put your tensorrt engine files in ComfyUI/models/tensorrt/ (you will have to create the directory)
+
+import os
+from pathlib import PurePath
 
 import torch
-import os
 
 import comfy.model_base
 import comfy.model_management
 import comfy.model_patcher
 import comfy.supported_models
-import folder_paths
+from comfy.cmd import folder_paths
+from comfy.model_patcher import ModelPatcher
 
 if "tensorrt" in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["tensorrt"][0].append(
@@ -24,6 +27,7 @@ trt.init_libnvinfer_plugins(None, "")
 logger = trt.Logger(trt.Logger.INFO)
 runtime = trt.Runtime(logger)
 
+
 # Is there a function that already exists for this?
 def trt_datatype_to_torch(datatype):
     if datatype == trt.float16:
@@ -35,12 +39,81 @@ def trt_datatype_to_torch(datatype):
     elif datatype == trt.bfloat16:
         return torch.bfloat16
 
+
+class TrTModelManageable(ModelPatcher):
+    def __init__(self, model: comfy.model_base.BaseModel, unet: "TrTUnet", load_device, offload_device):
+        self._unet = unet
+        super().__init__(model, load_device, offload_device, size=unet.size, ckpt_name=PurePath(unet.engine_path).stem)
+
+    @property
+    def engine(self):
+        return self._unet.engine
+
+    @engine.setter
+    def engine(self, value):
+        self._unet.engine = value
+
+    @property
+    def context(self):
+        return self._unet.context
+
+    @context.setter
+    def context(self, value):
+        self._unet.context = value
+
+    def patch_model(self, device_to=None, lowvram_model_memory=0, load_weights=True, force_patch_weights=False):
+        self._unet.load()
+        return super().patch_model(device_to, lowvram_model_memory, load_weights, force_patch_weights)
+
+    def unpatch_model(self, device_to=None, unpatch_weights=False):
+        self._unet.unload()
+        return super().unpatch_model(device_to=device_to, unpatch_weights=unpatch_weights)
+
+    def model_size(self):
+        return self._unet.size
+
+    def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
+        self._unet.load()
+        super().load(device_to, lowvram_model_memory, force_patch_weights, full_load)
+
+    def model_dtype(self):
+        return self._unet.dtype
+
+    def is_clone(self, other):
+        return other is not None and isinstance(other,
+                                                TrTModelManageable) and other._unet is self._unet and super().is_clone(
+            other)
+
+    def clone_has_same_weights(self, clone):
+        return clone is not None and isinstance(clone,
+                                                TrTModelManageable) and clone._unet.engine_path == self._unet.engine_path and super().clone_has_same_weights(
+            clone)
+
+    def memory_required(self, input_shape):
+        return self.model_size()  # This is an approximation
+
+    def __str__(self):
+        return f"<TrtModelManageable {self.ckpt_name}>"
+
+
 class TrTUnet:
     def __init__(self, engine_path):
-        with open(engine_path, "rb") as f:
+        self.dtype = torch.bfloat16
+        self.engine_path = engine_path
+        self.engine = None
+        self.context = None
+        self._size = int(os.stat(engine_path).st_size)
+
+    def load(self):
+        if self.engine is not None or self.context is not None:
+            return
+        with open(self.engine_path, "rb") as f:
             self.engine = runtime.deserialize_cuda_engine(f.read())
-        self.context = self.engine.create_execution_context()
-        self.dtype = torch.float16
+            self.context = self.engine.create_execution_context()
+
+    @property
+    def size(self) -> int:
+        return self._size
 
     def set_bindings_shape(self, inputs, split_batch):
         for k in inputs:
@@ -64,7 +137,7 @@ class TrTUnet:
         opt_batch = dims[1][0]
         max_batch = dims[2][0]
 
-        #Split batch if our batch is bigger than the max batch size the trt engine supports
+        # Split batch if our batch is bigger than the max batch size the trt engine supports
         for i in range(max_batch, min_batch - 1, -1):
             if batch_size % i == 0:
                 curr_split_batch = batch_size // i
@@ -81,7 +154,7 @@ class TrTUnet:
         out_shape = self.engine.get_tensor_shape(output_binding_name)
         out_shape = list(out_shape)
 
-        #for dynamic profile case where the dynamic params are -1
+        # for dynamic profile case where the dynamic params are -1
         for idx in range(len(out_shape)):
             if out_shape[idx] == -1:
                 out_shape[idx] = x.shape[idx]
@@ -89,8 +162,8 @@ class TrTUnet:
                 if idx == 0:
                     out_shape[idx] *= curr_split_batch
 
-        out = torch.empty(out_shape, 
-                          device=x.device, 
+        out = torch.empty(out_shape,
+                          device=x.device,
                           dtype=trt_datatype_to_torch(self.engine.get_tensor_dtype(output_binding_name)))
         model_inputs_converted[output_binding_name] = out
 
@@ -109,13 +182,35 @@ class TrTUnet:
     def state_dict(self):
         return {}
 
+    def unload(self):
+        engine_obj = self.engine
+        self.engine = None
+        if engine_obj is not None:
+            del engine_obj
+        context_obj = self.context
+        self.context = None
+        if context_obj is not None:
+            del context_obj
+
 
 class TensorRTLoader:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": {"unet_name": (folder_paths.get_filename_list("tensorrt"), ),
-                             "model_type": (["sdxl_base", "sdxl_refiner", "sd1.x", "sd2.x-768v", "svd", "sd3", "auraflow", "flux_dev", "flux_schnell"], ),
+        return {"required": {"unet_name": (folder_paths.get_filename_list("tensorrt"),),
+                             "model_type": (
+                                 [
+                                     "sdxl_base",
+                                     "sdxl_refiner",
+                                     "sd1.x",
+                                     "sd2.x-768v",
+                                     "svd",
+                                     "sd3",
+                                     "auraflow",
+                                     "flux_dev",
+                                     "flux_schnell",
+                                 ],),
                              }}
+
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load_unet"
     CATEGORY = "TensorRT"
@@ -158,18 +253,20 @@ class TensorRTLoader:
             conf = comfy.supported_models.Flux({})
             conf.unet_config["disable_unet_model_creation"] = True
             model = conf.get_model({})
-            unet.dtype = torch.bfloat16 #TODO: autodetect
         elif model_type == "flux_schnell":
             conf = comfy.supported_models.FluxSchnell({})
             conf.unet_config["disable_unet_model_creation"] = True
             model = conf.get_model({})
-            unet.dtype = torch.bfloat16 #TODO: autodetect
+        else:
+            raise ValueError("unsupported model_type")
         model.diffusion_model = unet
-        model.memory_required = lambda *args, **kwargs: 0 #always pass inputs batched up as much as possible, our TRT code will handle batch splitting
 
-        return (comfy.model_patcher.ModelPatcher(model,
-                                                 load_device=comfy.model_management.get_torch_device(),
-                                                 offload_device=comfy.model_management.unet_offload_device()),)
+        load_device = comfy.model_management.get_torch_device()
+        offload_device = comfy.model_management.unet_offload_device()
+        manageable_model = TrTModelManageable(model, unet, load_device, offload_device)
+
+        return (manageable_model,)
+
 
 NODE_CLASS_MAPPINGS = {
     "TensorRTLoader": TensorRTLoader,

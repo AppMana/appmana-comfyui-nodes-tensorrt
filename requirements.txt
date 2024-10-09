@@ -1,2 +1,6 @@
-tensorrt>=10.0.1
+tensorrt-cu12
+tensorrt-cu12-libs>=10.0.1
 onnx!=1.16.2
+onnxscript
+optimum
+optimum-quanto

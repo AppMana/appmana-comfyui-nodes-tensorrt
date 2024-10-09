@@ -1,27 +1,25 @@
-import torch
-import sys
 import os
 import time
-import comfy.model_management
+from pathlib import Path
 
 import tensorrt as trt
-import folder_paths
+import torch
 from tqdm import tqdm
+
+import comfy.model_base
+import comfy.model_management
+from comfy.cmd import folder_paths
+from comfy.model_patcher import ModelPatcher
 
 # TODO:
 # Make it more generic: less model specific code
 
 # add output directory to tensorrt search path
-if "tensorrt" in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["tensorrt"][0].append(
-        os.path.join(folder_paths.get_output_directory(), "tensorrt")
-    )
-    folder_paths.folder_names_and_paths["tensorrt"][1].add(".engine")
-else:
-    folder_paths.folder_names_and_paths["tensorrt"] = (
-        [os.path.join(folder_paths.get_output_directory(), "tensorrt")],
-        {".engine"},
-    )
+folder_paths.add_model_folder_path("tensorrt", extensions={".engine"})
+folder_paths.add_model_folder_path("tensorrt",
+                                   full_folder_path=str(Path(folder_paths.get_output_directory()) / "tensorrt"),
+                                   extensions={".engine"})
+
 
 class TQDMProgressMonitor(trt.IProgressMonitor):
     def __init__(self):
@@ -35,10 +33,10 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
         try:
             if parent_phase is not None:
                 nbIndents = (
-                    self._active_phases.get(parent_phase, {}).get(
-                        "nbIndents", self.max_indent
-                    )
-                    + 1
+                        self._active_phases.get(parent_phase, {}).get(
+                            "nbIndents", self.max_indent
+                        )
+                        + 1
                 )
                 if nbIndents >= self.max_indent:
                     return
@@ -71,8 +69,8 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
                         "parent_phase", None
                     )
                 if (
-                    self._active_phases[phase_name]["parent_phase"]
-                    in self._active_phases.keys()
+                        self._active_phases[phase_name]["parent_phase"]
+                        in self._active_phases.keys()
                 ):
                     self._active_phases[
                         self._active_phases[phase_name]["parent_phase"]
@@ -92,7 +90,7 @@ class TQDMProgressMonitor(trt.IProgressMonitor):
         except KeyboardInterrupt:
             # There is no need to propagate this exception to TensorRT. We can simply cancel the build.
             return False
-        
+
 
 class TRT_MODEL_CONVERSION_BASE:
     def __init__(self):
@@ -130,23 +128,23 @@ class TRT_MODEL_CONVERSION_BASE:
             timing_cache_file.write(memoryview(timing_cache.serialize()))
 
     def _convert(
-        self,
-        model,
-        filename_prefix,
-        batch_size_min,
-        batch_size_opt,
-        batch_size_max,
-        height_min,
-        height_opt,
-        height_max,
-        width_min,
-        width_opt,
-        width_max,
-        context_min,
-        context_opt,
-        context_max,
-        num_video_frames,
-        is_static: bool,
+            self,
+            model: ModelPatcher,
+            filename_prefix,
+            batch_size_min,
+            batch_size_opt,
+            batch_size_max,
+            height_min,
+            height_opt,
+            height_max,
+            width_min,
+            width_opt,
+            width_max,
+            context_min,
+            context_opt,
+            context_max,
+            num_video_frames,
+            is_static: bool,
     ):
         output_onnx = os.path.normpath(
             os.path.join(
@@ -163,13 +161,13 @@ class TRT_MODEL_CONVERSION_BASE:
         context_len_min = context_len
         y_dim = model.model.adm_channels
         extra_input = {}
-        dtype = torch.float16
+        dtype = model.model_dtype()
 
-        if isinstance(model.model, comfy.model_base.SD3): #SD3
+        if isinstance(model.model, comfy.model_base.SD3):  # SD3
             context_embedder_config = model.model.model_config.unet_config.get("context_embedder_config", None)
             if context_embedder_config is not None:
                 context_dim = context_embedder_config.get("params", {}).get("in_features", None)
-                context_len = 154 #NOTE: SD3 can have 77 or 154 depending on which text encoders are used, this is why context_len_min stays 77
+                context_len = 154  # NOTE: SD3 can have 77 or 154 depending on which text encoders are used, this is why context_len_min stays 77
         elif isinstance(model.model, comfy.model_base.AuraFlow):
             context_dim = 2048
             context_len_min = 256
@@ -180,7 +178,6 @@ class TRT_MODEL_CONVERSION_BASE:
             context_len = 256
             y_dim = model.model.model_config.unet_config.get("vec_in_dim", None)
             extra_input = {"guidance": ()}
-            dtype = torch.bfloat16
 
         if context_dim is not None:
             input_names = ["x", "timesteps", "context"]
@@ -194,13 +191,19 @@ class TRT_MODEL_CONVERSION_BASE:
 
             transformer_options = model.model_options['transformer_options'].copy()
             if model.model.model_config.unet_config.get(
-                "use_temporal_resblock", False
+                    "use_temporal_resblock", False
             ):  # SVD
                 batch_size_min = num_video_frames * batch_size_min
                 batch_size_opt = num_video_frames * batch_size_opt
                 batch_size_max = num_video_frames * batch_size_max
 
                 class UNET(torch.nn.Module):
+                    def __init__(self, unet: torch.nn.Module, transformer_options, num_video_frames):
+                        super().__init__()
+                        self.unet = unet
+                        self.transformer_options = transformer_options
+                        self.num_video_frames = num_video_frames
+
                     def forward(self, x, timesteps, context, y):
                         return self.unet(
                             x,
@@ -211,24 +214,25 @@ class TRT_MODEL_CONVERSION_BASE:
                             transformer_options=self.transformer_options,
                         )
 
-                svd_unet = UNET()
-                svd_unet.num_video_frames = num_video_frames
-                svd_unet.unet = unet
-                svd_unet.transformer_options = transformer_options
+                svd_unet = UNET(unet, transformer_options, num_video_frames)
                 unet = svd_unet
                 context_len_min = context_len = 1
             else:
                 class UNET(torch.nn.Module):
+                    def __init__(self, unet: torch.nn.Module, transformer_options):
+                        super().__init__()
+                        self.unet = unet
+                        self.transformer_options = transformer_options
+
                     def forward(self, x, timesteps, context, *args):
                         extras = input_names[3:]
                         extra_args = {}
                         for i in range(len(extras)):
                             extra_args[extras[i]] = args[i]
-                        return self.unet(x, timesteps, context, transformer_options=self.transformer_options, **extra_args)
+                        return self.unet(x, timesteps, context, transformer_options=self.transformer_options,
+                                         **extra_args)
 
-                _unet = UNET()
-                _unet.unet = unet
-                _unet.transformer_options = transformer_options
+                _unet = UNET(unet, transformer_options)
                 unet = _unet
 
             input_channels = model.model.model_config.unet_config.get("in_channels", 4)
@@ -263,7 +267,6 @@ class TRT_MODEL_CONVERSION_BASE:
                 inputs_shapes_opt += ((batch_size_opt,) + extra_input[k],)
                 inputs_shapes_max += ((batch_size_max,) + extra_input[k],)
 
-
             inputs = ()
             for shape in inputs_shapes_opt:
                 inputs += (
@@ -279,16 +282,17 @@ class TRT_MODEL_CONVERSION_BASE:
             return ()
 
         os.makedirs(os.path.dirname(output_onnx), exist_ok=True)
-        torch.onnx.export(
-            unet,
-            inputs,
-            output_onnx,
-            verbose=False,
-            input_names=input_names,
-            output_names=output_names,
-            opset_version=17,
-            dynamic_axes=dynamic_axes,
-        )
+        with torch.no_grad():
+            torch.onnx.export(
+                unet,
+                inputs,
+                output_onnx,
+                verbose=False,
+                input_names=input_names,
+                output_names=output_names,
+                opset_version=19,
+                dynamic_axes=dynamic_axes,
+            )
 
         comfy.model_management.unload_all_models()
         comfy.model_management.soft_empty_cache()
@@ -327,11 +331,10 @@ class TRT_MODEL_CONVERSION_BASE:
                 input_names[k], encode(min_shape), encode(opt_shape), encode(max_shape)
             )
 
-        if dtype == torch.float16:
-            config.set_flag(trt.BuilderFlag.FP16)
-        if dtype == torch.bfloat16:
-            config.set_flag(trt.BuilderFlag.BF16)
-
+        config.set_flag(trt.BuilderFlag.FP16)
+        config.set_flag(trt.BuilderFlag.BF16)
+        config.set_flag(trt.BuilderFlag.INT8)
+        config.set_flag(trt.BuilderFlag.SPARSE_WEIGHTS)
         config.add_optimization_profile(profile)
 
         if is_static:
@@ -519,22 +522,22 @@ class DYNAMIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
         }
 
     def convert(
-        self,
-        model,
-        filename_prefix,
-        batch_size_min,
-        batch_size_opt,
-        batch_size_max,
-        height_min,
-        height_opt,
-        height_max,
-        width_min,
-        width_opt,
-        width_max,
-        context_min,
-        context_opt,
-        context_max,
-        num_video_frames,
+            self,
+            model,
+            filename_prefix,
+            batch_size_min,
+            batch_size_opt,
+            batch_size_max,
+            height_min,
+            height_opt,
+            height_max,
+            width_min,
+            width_opt,
+            width_max,
+            context_min,
+            context_opt,
+            context_max,
+            num_video_frames,
     ):
         return super()._convert(
             model,
@@ -615,14 +618,14 @@ class STATIC_TRT_MODEL_CONVERSION(TRT_MODEL_CONVERSION_BASE):
         }
 
     def convert(
-        self,
-        model,
-        filename_prefix,
-        batch_size_opt,
-        height_opt,
-        width_opt,
-        context_opt,
-        num_video_frames,
+            self,
+            model,
+            filename_prefix,
+            batch_size_opt,
+            height_opt,
+            width_opt,
+            context_opt,
+            num_video_frames,
     ):
         return super()._convert(
             model,
