@@ -1,24 +1,17 @@
+import logging
 import os
 import time
-from pathlib import Path
 
-import tensorrt as trt
 import torch
+from torch.export import ExportedProgram
 from tqdm import tqdm
 
 import comfy.model_base
 import comfy.model_management
 from comfy.cmd import folder_paths
 from comfy.model_patcher import ModelPatcher
-
-# TODO:
-# Make it more generic: less model specific code
-
-# add output directory to tensorrt search path
-folder_paths.add_model_folder_path("tensorrt", extensions={".engine"})
-folder_paths.add_model_folder_path("tensorrt",
-                                   full_folder_path=str(Path(folder_paths.get_output_directory()) / "tensorrt"),
-                                   extensions={".engine"})
+from comfy.utils import comfy_tqdm
+from .trt_stub import trt
 
 
 class TQDMProgressMonitor(trt.IProgressMonitor):
@@ -96,9 +89,7 @@ class TRT_MODEL_CONVERSION_BASE:
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
         self.temp_dir = folder_paths.get_temp_directory()
-        self.timing_cache_path = os.path.normpath(
-            os.path.join(os.path.join(os.path.dirname(os.path.realpath(__file__)), "timing_cache.trt"))
-        )
+        self.timing_cache_path = os.path.normpath(os.path.join(folder_paths.get_output_directory(), "timing_cache.trt"))
 
     RETURN_TYPES = ()
     FUNCTION = "convert"
@@ -145,6 +136,8 @@ class TRT_MODEL_CONVERSION_BASE:
             context_max,
             num_video_frames,
             is_static: bool,
+            with_export: bool=False,
+            enable_int8: bool=False,
     ):
         output_onnx = os.path.normpath(
             os.path.join(
@@ -154,7 +147,7 @@ class TRT_MODEL_CONVERSION_BASE:
 
         comfy.model_management.unload_all_models()
         comfy.model_management.load_models_gpu([model], force_patch_weights=True, force_full_load=True)
-        unet = model.model.diffusion_model
+        unet = model.diffusion_model
 
         context_dim = model.model.model_config.unet_config.get("context_dim", None)
         context_len = 77
@@ -243,8 +236,11 @@ class TRT_MODEL_CONVERSION_BASE:
                 (batch_size_min, context_len_min * context_min, context_dim),
             )
             inputs_shapes_opt = (
+                # latent B C H W
                 (batch_size_opt, input_channels, height_opt // 8, width_opt // 8),
+                # timesteps
                 (batch_size_opt,),
+                # conditioning
                 (batch_size_opt, context_len * context_opt, context_dim),
             )
             inputs_shapes_max = (
@@ -278,10 +274,21 @@ class TRT_MODEL_CONVERSION_BASE:
                 )
 
         else:
-            print("ERROR: model not supported.")
+            logging.debug("ERROR: model not supported.")
             return ()
 
         os.makedirs(os.path.dirname(output_onnx), exist_ok=True)
+
+        # todo: setup dynamic shapes
+        logging.debug(f"unet ExportedProgram starting for\n{unet}")
+        if with_export:
+            unet = torch.export.export(
+                unet,
+                inputs,
+            ).module()
+
+        logging.debug(f"unet ExportedProgram:\n{unet}")
+
         with torch.no_grad():
             torch.onnx.export(
                 unet,
@@ -293,6 +300,7 @@ class TRT_MODEL_CONVERSION_BASE:
                 opset_version=19,
                 dynamic_axes=dynamic_axes,
             )
+            logging.debug(f"unet onnx exported to {output_onnx}")
 
         comfy.model_management.unload_all_models()
         comfy.model_management.soft_empty_cache()
@@ -331,9 +339,12 @@ class TRT_MODEL_CONVERSION_BASE:
                 input_names[k], encode(min_shape), encode(opt_shape), encode(max_shape)
             )
 
-        config.set_flag(trt.BuilderFlag.FP16)
-        config.set_flag(trt.BuilderFlag.BF16)
-        config.set_flag(trt.BuilderFlag.INT8)
+        if dtype == torch.float16:
+            config.set_flag(trt.BuilderFlag.FP16)
+        elif dtype == torch.bfloat16:
+            config.set_flag(trt.BuilderFlag.BF16)
+        if enable_int8:
+            config.set_flag(trt.BuilderFlag.INT8)
         config.set_flag(trt.BuilderFlag.SPARSE_WEIGHTS)
         config.add_optimization_profile(profile)
 

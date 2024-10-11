@@ -1,5 +1,3 @@
-# Put this in the custom_nodes folder, put your tensorrt engine files in ComfyUI/models/tensorrt/ (you will have to create the directory)
-
 import os
 from pathlib import PurePath
 
@@ -12,15 +10,7 @@ import comfy.supported_models
 from comfy.cmd import folder_paths
 from comfy.model_patcher import ModelPatcher
 
-if "tensorrt" in folder_paths.folder_names_and_paths:
-    folder_paths.folder_names_and_paths["tensorrt"][0].append(
-        os.path.join(folder_paths.models_dir, "tensorrt"))
-    folder_paths.folder_names_and_paths["tensorrt"][1].add(".engine")
-else:
-    folder_paths.folder_names_and_paths["tensorrt"] = (
-        [os.path.join(folder_paths.models_dir, "tensorrt")], {".engine"})
-
-import tensorrt as trt
+from .trt_stub import trt
 
 trt.init_libnvinfer_plugins(None, "")
 
