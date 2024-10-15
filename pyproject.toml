@@ -4,13 +4,14 @@ description = "TensorRT Node for ComfyUI\nThis node enables the best performance
 version = "0.1.7"
 license = { file = "LICENSE" }
 dependencies = [
-  "comfyui>=0.2.3",
-  "nvidia-stub>=0.0.1",
-  "tensorrt-cu12>=10.3.0",
-  "tensorrt-cu12-bindings>=10.3.0",
-  "tensorrt-cu12-libs>=10.3.0",
-  "onnx<1.16.2",
-  "onnxscript>=0.0.1",
+    "comfyui>=0.2.3",
+    # peacefully installs and will not do anything on macOS
+    "nvidia-stub>=0.0.1; platform_system != 'Darwin'",
+    "tensorrt-cu12>=10.3.0; platform_system != 'Darwin'",
+    "tensorrt-cu12-bindings>=10.3.0; platform_system != 'Darwin'",
+    "tensorrt-cu12-libs>=10.3.0; platform_system != 'Darwin'",
+    "onnx<1.16.2",
+    "onnxscript>=0.0.1",
 ]
 
 [project.urls]
@@ -28,9 +29,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["comfyui_tensorrt"]
 package-dir = { "comfyui_tensorrt" = "." }
-
-[tool.uv]
-cache-keys = [{ file =A "pyproject.toml" }, { file = "requirements.txt" }, { git = true }]
 
 [[tool.uv.index]]
 name = "nvidia"
