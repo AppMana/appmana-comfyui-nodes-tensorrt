@@ -10,7 +10,6 @@ dependencies = [
     "tensorrt-cu12>=10.3.0; platform_system != 'Darwin'",
     "tensorrt-cu12-bindings>=10.3.0; platform_system != 'Darwin'",
     "tensorrt-cu12-libs>=10.3.0; platform_system != 'Darwin'",
-    "onnx<1.16.2",
     "onnxscript>=0.0.1",
 ]
 
