@@ -1,16 +1,14 @@
-import logging
-import os
 import time
 
+import logging
+import os
 import torch
-from torch.export import ExportedProgram
 from tqdm import tqdm
 
 import comfy.model_base
 import comfy.model_management
 from comfy.cmd import folder_paths
 from comfy.model_patcher import ModelPatcher
-from comfy.utils import comfy_tqdm
 from .trt_stub import trt
 
 
